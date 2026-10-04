@@ -54,20 +54,24 @@ const form = reactive({
 
 const records = computed(() => surveyStore.coralsOfBelt(beltId.value))
 
-/** 按属名分组汇总 */
+/** 统计仅计已选定（非未决）记录；未决副本在表格中标来源，选定前不参与覆盖率/白化汇总 */
+const activeRecords = computed(() => records.value.filter((record) => record.pending !== true))
+const pendingRecords = computed(() => records.value.filter((record) => record.pending === true))
+
+/** 按属名分组汇总（仅已选定记录） */
 const genusGroups = computed(() =>
-  groupByGenus(records.value).map((group) => {
-    const list = records.value.filter((record) => record.genus === group.genus)
+  groupByGenus(activeRecords.value).map((group) => {
+    const list = activeRecords.value.filter((record) => record.genus === group.genus)
     const index = bleachIndex(list)
     return { ...group, count: list.length, bleachIndex: index, grade: bleachGrade(index) }
   })
 )
 
-/** 按形态分组汇总 */
-const formGroups = computed(() => groupByForm(records.value))
+/** 按形态分组汇总（仅已选定记录） */
+const formGroups = computed(() => groupByForm(activeRecords.value))
 
 const stats = computed(() => {
-  const list = records.value
+  const list = activeRecords.value
   const coverCmTotal = list.reduce((sum, record) => sum + record.coverCm, 0)
   const index = bleachIndex(list)
   return {
@@ -77,15 +81,16 @@ const stats = computed(() => {
     bleachIndex: index,
     grade: bleachGrade(index),
     bleachedSharePct: bleachedSharePct(list),
-    maxCoverCm: list.length ? Math.max(...list.map((record) => record.coverCm)) : 0
+    maxCoverCm: list.length ? Math.max(...list.map((record) => record.coverCm)) : 0,
+    pendingCount: pendingRecords.value.length
   }
 })
 
-/** 白化等级 → 累计覆盖长度 */
+/** 白化等级 → 累计覆盖长度（仅已选定记录） */
 const distribution = computed<Record<BleachLevel, number>>(() => {
   const result: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
   BLEACH_LEVELS.forEach((level) => {
-    result[level] = records.value
+    result[level] = activeRecords.value
       .filter((record) => record.bleachLevel === level)
       .reduce((sum, record) => sum + record.coverCm, 0)
   })
@@ -295,6 +300,19 @@ onMounted(() => {
         <StatBadge label="白化占比" :value="stats.bleachedSharePct" suffix="%" tone="warning" icon="TrendCharts" />
       </div>
 
+      <el-alert
+        v-if="stats.pendingCount > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 2px"
+      >
+        <template #title>
+          该样带有 {{ stats.pendingCount }} 条离线合并待选珊瑚记录（两边都改过，已保留两份），选定前不计入上方覆盖率与白化汇总。
+          <router-link to="/sync" style="margin-left: 8px">前往选定 →</router-link>
+        </template>
+      </el-alert>
+
       <el-card v-if="records.length > 0" shadow="never" class="gb-panel">
         <div class="gb-panel-title">
           <h3>汇总视图</h3>
@@ -373,7 +391,14 @@ onMounted(() => {
             <el-checkbox :model-value="selectedIds.includes(row.id)" @change="() => toggleSelect(row.id)" />
           </template>
         </el-table-column>
-        <el-table-column prop="genus" label="属名" min-width="140" />
+        <el-table-column prop="genus" label="属名" min-width="140">
+          <template #default="{ row }">
+            <span>{{ row.genus }}</span>
+            <el-tag v-if="row.pending" size="small" type="warning" effect="plain" style="margin-left: 6px">
+              待选 · {{ row.source || '调查组' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="form" label="形态" width="100" />
         <el-table-column label="覆盖长度 (cm)" width="140" align="right">
           <template #default="{ row }">

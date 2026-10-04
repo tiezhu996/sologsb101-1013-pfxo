@@ -104,7 +104,7 @@ export const useSurveyStore = defineStore('survey', () => {
     })
   }
 
-  /** 某样带的珊瑚记录（按白化等级降序、覆盖长度降序） */
+  /** 某样带的珊瑚记录（按白化等级降序、覆盖长度降序）；含未决副本，页面标注来源 */
   function coralsOfBelt(beltId: string | null | undefined): CoralRecord[] {
     if (!beltId) return []
     const order: Record<BleachLevel, number> = { 无: 0, 轻: 1, 中: 2, 重: 3, 死亡: 4 }
@@ -117,7 +117,7 @@ export const useSurveyStore = defineStore('survey', () => {
       })
   }
 
-  /** 某样带的鱼类/无脊椎动物计数 */
+  /** 某样带的鱼类/无脊椎动物计数；含未决副本，页面标注来源 */
   function fishesOfBelt(beltId: string | null | undefined): FishCount[] {
     if (!beltId) return []
     return fishes.value
@@ -125,7 +125,11 @@ export const useSurveyStore = defineStore('survey', () => {
       .sort((a, b) => b.count - a.count)
   }
 
-  /** 样带 id → 珊瑚记录数 / 鱼类记录数（样带列表回显用） */
+  /** 进入覆盖度汇总的珊瑚记录：待选差异（pending）选定前不参与统计 */
+  const activeCorals = computed(() => corals.value.filter((coral) => coral.pending !== true))
+  const activeFishes = computed(() => fishes.value.filter((fish) => fish.pending !== true))
+
+  /** 样带 id → 珊瑚记录数 / 鱼类记录数（样带列表回显用；未决副本计入原始条数提示） */
   const beltRecordCounts = computed<Record<string, { coralCount: number; fishCount: number }>>(() => {
     const counts: Record<string, { coralCount: number; fishCount: number }> = {}
     belts.value.forEach((belt) => {
@@ -137,14 +141,24 @@ export const useSurveyStore = defineStore('survey', () => {
     return counts
   })
 
-  /** 覆盖度汇总行（全部样带） */
-  const coverageRows = computed<CoverageSummaryRow[]>(() =>
-    belts.value
+  /**
+   * 覆盖度汇总行（全部样带）。
+   * 礁区 / 站位 / 样带 / 珊瑚记录 / 鱼类计数任一处于待选差异（pending）状态时，
+   * 该层级不进入汇总——必须在离线合并页选定后才统计，避免一份数据算两遍。
+   */
+  const coverageRows = computed<CoverageSummaryRow[]>(() => {
+    const activeReefIds = new Set(
+      reefs.value.filter((reef) => reef.pending !== true).map((reef) => reef.id)
+    )
+    const activeSites = sites.value.filter((site) => site.pending !== true && activeReefIds.has(site.reefId))
+    const activeSiteIds = new Set(activeSites.map((site) => site.id))
+    return belts.value
+      .filter((belt) => belt.pending !== true && activeSiteIds.has(belt.siteId))
       .map((belt) => {
-        const site = sites.value.find((item) => item.id === belt.siteId)
-        const reef = site ? reefs.value.find((item) => item.id === site.reefId) : undefined
-        const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
-        const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
+        const site = activeSites.find((item) => item.id === belt.siteId)
+        const reef = site ? reefs.value.find((item) => item.id === site.reefId && item.pending !== true) : undefined
+        const beltCorals = activeCorals.value.filter((coral) => coral.beltId === belt.id)
+        const beltFishes = activeFishes.value.filter((fish) => fish.beltId === belt.id)
         const coverCmTotal = round(
           beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
           1
@@ -184,7 +198,7 @@ export const useSurveyStore = defineStore('survey', () => {
         }
       })
       .sort((a, b) => b.bleachIndex - a.bleachIndex)
-  )
+  })
 
   /** 按筛选条件过滤后的覆盖度行 */
   const filteredCoverageRows = computed<CoverageSummaryRow[]>(() =>
@@ -212,26 +226,26 @@ export const useSurveyStore = defineStore('survey', () => {
       filter.value.onlyBleached
   )
 
-  /** 全局白化等级分布与总体指数 */
+  /** 全局白化等级分布与总体指数（未决副本选定前不参与） */
   const globalStats = computed(() => {
     const distribution: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        activeCorals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
     })
-    const index = bleachIndex(corals.value)
+    const index = bleachIndex(activeCorals.value)
     return {
-      coralCount: corals.value.length,
-      fishCount: fishes.value.length,
+      coralCount: activeCorals.value.length,
+      fishCount: activeFishes.value.length,
       coverCmTotal: round(
-        corals.value.reduce((sum, coral) => sum + coral.coverCm, 0),
+        activeCorals.value.reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       ),
       bleachIndex: index,
       grade: bleachGrade(index),
-      bleachedSharePct: bleachedSharePct(corals.value),
+      bleachedSharePct: bleachedSharePct(activeCorals.value),
       distribution
     }
   })
@@ -272,7 +286,7 @@ export const useSurveyStore = defineStore('survey', () => {
     await db.corals.delete(id)
   }
 
-  /** 批量导入粘贴行（替换该样带原有珊瑚记录） */
+  /** 批量导入粘贴行（替换该样带原有已选定珊瑚记录；待选差异副本保留，避免合并证据被抹掉） */
   async function importCoralRows(
     beltId: string,
     rows: Array<{ genus: string; form: CoralForm; coverCm: number; bleachLevel: BleachLevel }>
@@ -290,8 +304,10 @@ export const useSurveyStore = defineStore('survey', () => {
       updatedAt: now + index
     }))
     await db.transaction('rw', [db.corals], async () => {
+      const pendingKept = await db.corals.where('beltId').equals(beltId).toArray()
       await db.corals.where('beltId').equals(beltId).delete()
-      if (records.length > 0) await db.corals.bulkPut(records)
+      const kept = pendingKept.filter((row) => row.pending === true)
+      await db.corals.bulkPut([...kept, ...records])
     })
     return records.length
   }
@@ -329,7 +345,7 @@ export const useSurveyStore = defineStore('survey', () => {
     await db.fishes.delete(id)
   }
 
-  /** 批量导入粘贴行（替换该样带原有计数） */
+  /** 批量导入粘贴行（替换该样带原有已选定计数；待选差异副本保留） */
   async function importFishRows(
     beltId: string,
     rows: Array<{ family: string; count: number; sizeClass: SizeClass; category: CountCategory }>
@@ -346,8 +362,10 @@ export const useSurveyStore = defineStore('survey', () => {
       updatedAt: now + index
     }))
     await db.transaction('rw', [db.fishes], async () => {
+      const pendingKept = await db.fishes.where('beltId').equals(beltId).toArray()
       await db.fishes.where('beltId').equals(beltId).delete()
-      if (records.length > 0) await db.fishes.bulkPut(records)
+      const kept = pendingKept.filter((row) => row.pending === true)
+      await db.fishes.bulkPut([...kept, ...records])
     })
     return records.length
   }

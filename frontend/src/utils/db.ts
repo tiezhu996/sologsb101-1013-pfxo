@@ -11,9 +11,10 @@ import type { Site } from '@/types/site'
 import type { Belt } from '@/types/belt'
 import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
+import type { BackupKind, BaseManifest, SyncBatch } from '@/types/sync'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
@@ -22,8 +23,23 @@ export const DB_NAME = 'gbcoralbelt'
 export const LS_KEYS = {
   dbVersion: 'gbcoralbelt:db-version',
   lastBackupAt: 'gbcoralbelt:last-backup-at',
-  lastReefId: 'gbcoralbelt:last-reef-id'
+  lastReefId: 'gbcoralbelt:last-reef-id',
+  departureBase: 'gbcoralbelt:departure-base'
 } as const
+
+/** 备份内的批次摘要（原批次保留在本机 syncBatches 表，导出只带摘要与未决状态） */
+export interface BatchSummary {
+  id: string
+  groupName: string
+  status: SyncBatch['status']
+  fileName: string
+  createdAt: number
+  mergedAt: number | null
+  resolvedAt: number | null
+  conflictTotal: number
+  conflictResolved: number
+  pendingCounts: { reefs: number; sites: number; belts: number; corals: number; fishes: number }
+}
 
 /** 备份文件结构，供 utils/export.ts 与覆盖度汇总页使用 */
 export interface BackupPayload {
@@ -35,6 +51,14 @@ export interface BackupPayload {
   belts: Belt[]
   corals: CoralRecord[]
   fishes: FishCount[]
+  /** 备份用途：station 站部台账 / group 上岛调查组离站拷贝 */
+  kind?: BackupKind
+  /** 调查组名（kind=group 时），合并后作为记录来源 */
+  groupName?: string
+  /** 离站基线指纹（kind=group 时），回站三方对齐用 */
+  base?: BaseManifest | null
+  /** 本机保留的合并批次摘要（导出携带批次与未决状态） */
+  batches?: BatchSummary[]
 }
 
 export class CoralBeltDatabase extends Dexie {
@@ -43,6 +67,8 @@ export class CoralBeltDatabase extends Dexie {
   belts!: Table<Belt, string>
   corals!: Table<CoralRecord, string>
   fishes!: Table<FishCount, string>
+  /** 离线合并批次（原批次文件随批次行完整保留，失败可恢复） */
+  syncBatches!: Table<SyncBatch, string>
 
   constructor() {
     super(DB_NAME)
@@ -86,10 +112,45 @@ export class CoralBeltDatabase extends Dexie {
             })
         }
       })
+
+    // v3：离线合并（两组上岛 → 回站部并入主台账）
+    // - 五张业务表补 source / batchId / pending / conflictId 索引；
+    // - 新增 syncBatches 表：原批次文件随批次行完整保留，合并失败可恢复继续处理。
+    this.version(DB_VERSION)
+      .stores({
+        reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt, source, batchId, pending, conflictId',
+        sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt, source, batchId, pending, conflictId',
+        belts: 'id, siteId, no, lengthM, orientation, surveyDate, observer, updatedAt, source, batchId, pending, conflictId',
+        corals: 'id, beltId, genus, form, coverCm, bleachLevel, updatedAt, source, batchId, pending, conflictId',
+        fishes: 'id, beltId, family, count, sizeClass, category, updatedAt, source, batchId, pending, conflictId',
+        syncBatches: 'id, groupName, status, createdAt, mergedAt'
+      })
+      .upgrade(async (tx) => {
+        // 迁移：历史记录默认来源「主台账」、非未决；批次表为全新表，无历史行
+        for (const tableName of ['reefs', 'sites', 'belts', 'corals', 'fishes']) {
+          await tx
+            .table(tableName)
+            .toCollection()
+            .modify((row: Record<string, unknown>) => {
+              if (typeof row.source !== 'string') row.source = '主台账'
+              if (typeof row.batchId !== 'string') row.batchId = ''
+              if (typeof row.pending !== 'boolean') row.pending = false
+              if (typeof row.conflictId !== 'string') row.conflictId = ''
+            })
+        }
+      })
   }
 }
 
 export const db = new CoralBeltDatabase()
+
+/** 行级来源 / 未决标记默认值（播种与导入补齐用） */
+export const STATION_MARKERS = {
+  source: '主台账',
+  batchId: '',
+  pending: false,
+  conflictId: ''
+} as const
 
 /** 生成主键：短前缀 + 时间戳 + 随机串，避免多标签页写入冲突 */
 export function createId(prefix: string): string {
@@ -320,24 +381,32 @@ export async function seedDemoData(): Promise<void> {
       updatedAt: now + offset
     })
 
-    await db.reefs.bulkPut(reefs.map((reef, index) => ({ ...reef, ...stamp(index) })))
-    await db.sites.bulkPut(sites.map((site, index) => ({ ...site, ...stamp(100 + index) })))
+    await db.reefs.bulkPut(reefs.map((reef, index) => ({ ...STATION_MARKERS, ...reef, ...stamp(index) })))
+    await db.sites.bulkPut(sites.map((site, index) => ({ ...STATION_MARKERS, ...site, ...stamp(100 + index) })))
     await db.belts.bulkPut(
       belts.map((belt, index) => {
         const { corals, fishes, ...rest } = belt
         void corals
         void fishes
-        return { ...rest, ...stamp(200 + index) }
+        return { ...STATION_MARKERS, ...rest, ...stamp(200 + index) }
       })
     )
     await db.corals.bulkPut(
       belts.flatMap((belt, beltIndex) =>
-        belt.corals.map((coral, coralIndex) => ({ ...coral, ...stamp(300 + beltIndex * 100 + coralIndex) }))
+        belt.corals.map((coral, coralIndex) => ({
+          ...STATION_MARKERS,
+          ...coral,
+          ...stamp(300 + beltIndex * 100 + coralIndex)
+        }))
       )
     )
     await db.fishes.bulkPut(
       belts.flatMap((belt, beltIndex) =>
-        belt.fishes.map((fish, fishIndex) => ({ ...fish, ...stamp(400 + beltIndex * 100 + fishIndex) }))
+        belt.fishes.map((fish, fishIndex) => ({
+          ...STATION_MARKERS,
+          ...fish,
+          ...stamp(400 + beltIndex * 100 + fishIndex)
+        }))
       )
     )
   })
@@ -353,27 +422,48 @@ export async function initDatabase(): Promise<void> {
   stampDbVersion()
 }
 
-/** 清空全部业务表（导入覆盖与重置共用） */
-export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await Promise.all([db.reefs.clear(), db.sites.clear(), db.belts.clear(), db.corals.clear(), db.fishes.clear()])
+/**
+ * 清空全部业务表（导入覆盖与重置共用）。
+ * 离线合并批次默认保留在本机；只有重置演示数据时才连同批次一起清掉。
+ */
+export async function clearAllTables(includeBatches = false): Promise<void> {
+  const tables = includeBatches
+    ? [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.syncBatches]
+    : [db.reefs, db.sites, db.belts, db.corals, db.fishes]
+  await db.transaction('rw', tables, async () => {
+    await Promise.all(tables.map((table) => table.clear()))
   })
 }
 
-/** 清空并重新播种演示数据 */
+/** 清空并重新播种演示数据（同时丢弃历史合并批次） */
 export async function resetDatabase(): Promise<void> {
-  await clearAllTables()
+  await clearAllTables(true)
   await seedDemoData()
 }
 
 /** 统计各表行数，供页脚概览与覆盖度页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, belts, corals, fishes, batches] = await Promise.all([
     db.reefs.count(),
     db.sites.count(),
     db.belts.count(),
     db.corals.count(),
-    db.fishes.count()
+    db.fishes.count(),
+    db.syncBatches.count()
+  ])
+  return { reefs, sites, belts, corals, fishes, batches }
+}
+
+/** 未决（待选差异）记录行数：这些行不进入覆盖度汇总 */
+export async function countPending(): Promise<{ reefs: number; sites: number; belts: number; corals: number; fishes: number }> {
+  const pendingOf = (table: Table<{ pending?: boolean }, string>) =>
+    table.filter((row) => row.pending === true).count()
+  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+    pendingOf(db.reefs),
+    pendingOf(db.sites),
+    pendingOf(db.belts),
+    pendingOf(db.corals),
+    pendingOf(db.fishes)
   ])
   return { reefs, sites, belts, corals, fishes }
 }

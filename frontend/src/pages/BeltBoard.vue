@@ -41,17 +41,20 @@ const form = reactive({
   observer: ''
 })
 
-/** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数 */
+/** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数（待选记录选定前不计入） */
 const rows = computed(() =>
   beltStore.beltsOfSite(siteId.value).map((belt) => {
-    const corals = surveyStore.coralsOfBelt(belt.id)
-    const fishes = surveyStore.fishesOfBelt(belt.id)
+    const allCorals = surveyStore.coralsOfBelt(belt.id)
+    const allFishes = surveyStore.fishesOfBelt(belt.id)
+    const corals = allCorals.filter((record) => record.pending !== true)
+    const fishes = allFishes.filter((record) => record.pending !== true)
     const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
     const index = bleachIndex(corals)
     const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
     return {
       belt,
       coralCount: corals.length,
+      pendingCoralCount: allCorals.length - corals.length,
       fishCount: fishes.length,
       coverCmTotal,
       coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
@@ -264,7 +267,12 @@ onMounted(() => {
       />
 
       <el-table v-else :data="rows" border stripe class="gb-table-compact">
-        <el-table-column prop="belt.no" label="样带编号" width="110" />
+        <el-table-column label="样带编号" width="150">
+          <template #default="{ row }">
+            <span class="gb-mono">{{ row.belt.no }}</span>
+            <el-tag v-if="row.belt.pending" size="small" type="warning" effect="plain" style="margin-left: 4px">待选</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="朝向" width="90" align="center">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.belt.orientation }}</el-tag>

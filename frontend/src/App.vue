@@ -5,10 +5,11 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { Connection, DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useSyncStore } from '@/stores/syncStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,11 +17,13 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const syncStore = useSyncStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  syncStore.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
@@ -28,12 +31,19 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/reefs/')) return '/reefs'
   if (route.path.startsWith('/sites/')) return '/reefs'
   if (route.path.startsWith('/belts/')) return '/coverage'
+  if (route.path.startsWith('/sync')) return '/sync'
   return route.path
 })
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
-  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
+  { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) },
+  {
+    key: '/sync',
+    label: '离线合并',
+    icon: Connection,
+    badge: syncStore.openConflictCount > 0 ? String(syncStore.openConflictCount) : ''
+  }
 ])
 
 /** 当前上下文的快捷入口：礁区 → 站位 → 样带 → 珊瑚/鱼类 */
@@ -109,6 +119,9 @@ function go(path: string): void {
       <span>
         礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
         {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+        <template v-if="syncStore.openConflictCount > 0">
+          · <strong class="app-footer__warn">待选差异 {{ syncStore.openConflictCount }} 组（未计入汇总）</strong>
+        </template>
       </span>
     </footer>
   </div>
@@ -199,6 +212,15 @@ function go(path: string): void {
   padding: 0 6px;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.18);
+}
+
+.app-nav__item .app-nav__badge:not(:empty) {
+  background: #d98a2b;
+  color: #fff;
+}
+
+.app-footer__warn {
+  color: #b56a12;
 }
 
 .app-context {

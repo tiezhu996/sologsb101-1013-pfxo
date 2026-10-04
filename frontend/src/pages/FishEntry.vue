@@ -56,13 +56,28 @@ const records = computed(() => {
   return list.filter((record) => record.category === categoryFilter.value)
 })
 
-/** 按科名 + 体长段汇总 */
-const summary = computed(() => surveyStore.fishSummaryOfBelt(beltId.value))
+/** 已选定记录参与统计；未决副本只在表格标注来源，选定前不进入密度汇总 */
+const activeRecords = computed(() => surveyStore.fishesOfBelt(beltId.value).filter((record) => record.pending !== true))
+const pendingCount = computed(() => surveyStore.fishesOfBelt(beltId.value).filter((record) => record.pending === true).length)
 
-/** 按体长段汇总（鱼类与无脊椎动物合计） */
+/** 按科名 + 体长段汇总（仅已选定记录） */
+const summary = computed(() => {
+  const map = new Map<string, { family: string; category: CountCategory; total: number; bySize: Record<SizeClass, number> }>()
+  activeRecords.value.forEach((fish) => {
+    const bucket =
+      map.get(fish.family) ??
+      { family: fish.family, category: fish.category, total: 0, bySize: { '0-10cm': 0, '11-20cm': 0, '21-30cm': 0, '>30cm': 0 } }
+    bucket.total += fish.count
+    bucket.bySize[fish.sizeClass] += fish.count
+    map.set(fish.family, bucket)
+  })
+  return Array.from(map.values()).sort((a, b) => b.total - a.total)
+})
+
+/** 按体长段汇总（仅已选定记录） */
 const sizeSummary = computed(() =>
   SIZE_CLASSES.map((sizeClass) => {
-    const list = surveyStore.fishesOfBelt(beltId.value).filter((record) => record.sizeClass === sizeClass)
+    const list = activeRecords.value.filter((record) => record.sizeClass === sizeClass)
     return {
       sizeClass,
       count: list.reduce((sum, record) => sum + record.count, 0),
@@ -72,7 +87,7 @@ const sizeSummary = computed(() =>
 )
 
 const stats = computed(() => {
-  const list = surveyStore.fishesOfBelt(beltId.value)
+  const list = activeRecords.value
   const fishTotal = list.filter((record) => record.category === '鱼类').reduce((sum, record) => sum + record.count, 0)
   const invertebrateTotal = list
     .filter((record) => record.category === '无脊椎动物')
@@ -280,6 +295,19 @@ onMounted(() => {
         <StatBadge label="科名数" :value="stats.familyCount" suffix="科" tone="default" icon="Files" />
       </div>
 
+      <el-alert
+        v-if="pendingCount > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 2px"
+      >
+        <template #title>
+          该样带有 {{ pendingCount }} 条离线合并待选计数记录（两边都改过，已保留两份），选定前不计入上方密度汇总。
+          <router-link to="/sync" style="margin-left: 8px">前往选定 →</router-link>
+        </template>
+      </el-alert>
+
       <el-card v-if="stats.recordCount > 0" shadow="never" class="gb-panel">
         <div class="gb-panel-title">
           <h3>汇总视图</h3>
@@ -369,7 +397,14 @@ onMounted(() => {
             <el-checkbox :model-value="selectedIds.includes(row.id)" @change="() => toggleSelect(row.id)" />
           </template>
         </el-table-column>
-        <el-table-column prop="family" label="科名" min-width="140" />
+        <el-table-column label="科名" min-width="140">
+          <template #default="{ row }">
+            <span>{{ row.family }}</span>
+            <el-tag v-if="row.pending" size="small" type="warning" effect="plain" style="margin-left: 6px">
+              待选 · {{ row.source || '调查组' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="类别" width="120">
           <template #default="{ row }">
             <el-tag size="small" :type="row.category === '鱼类' ? 'primary' : 'warning'" effect="plain">

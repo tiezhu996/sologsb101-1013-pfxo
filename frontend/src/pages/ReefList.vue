@@ -40,16 +40,19 @@ const form = reactive({
   manager: ''
 })
 
-/** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数 */
+/** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数（待选差异选定前不计入） */
 const cards = computed(() =>
   reefStore.filteredReefs.map((reef: Reef) => {
-    const sites = reefStore.sites.filter((site) => site.reefId === reef.id)
+    const sites = reefStore.sites.filter((site) => site.reefId === reef.id && site.pending !== true)
     const siteIds = new Set(sites.map((site) => site.id))
-    const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId))
+    const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId) && belt.pending !== true)
     const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
-    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId))
+    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId) && coral.pending !== true)
+    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId) && fish.pending !== true)
     const index = bleachIndex(corals)
+    const pendingDescendants =
+      reefStore.sites.filter((site) => site.reefId === reef.id && site.pending === true).length +
+      beltStore.belts.filter((belt) => siteIds.has(belt.siteId) && belt.pending === true).length
     return {
       reef,
       siteCount: sites.length,
@@ -57,7 +60,9 @@ const cards = computed(() =>
       coralCount: corals.length,
       fishTotal: fishes.reduce((sum, fish) => sum + fish.count, 0),
       bleachIndex: index,
-      grade: bleachGrade(index)
+      grade: bleachGrade(index),
+      pending: reef.pending === true,
+      pendingDescendants
     }
   })
 )
@@ -277,7 +282,12 @@ watch(
           <div class="reef-card__head">
             <div>
               <strong class="reef-card__name">{{ card.reef.name }}</strong>
+              <el-tag v-if="card.pending" size="small" type="warning" effect="plain">待选 · {{ card.reef.source || '调查组' }}</el-tag>
               <el-tag size="small" effect="plain" class="reef-card__status">{{ card.reef.protectStatus }}</el-tag>
+              <el-tag v-if="card.pendingDescendants > 0" size="small" type="warning">
+                下级 {{ card.pendingDescendants }} 项待选
+                <router-link to="/sync" style="margin-left: 4px">处理</router-link>
+              </el-tag>
             </div>
             <BleachTag :level="card.grade" size="small" />
           </div>

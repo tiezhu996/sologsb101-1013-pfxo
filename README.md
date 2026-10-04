@@ -32,7 +32,7 @@ docker compose up -d --build      # 修改代码后重新构建
 | 构建 | Vite 6 | 产物 `dist/`，交给 nginx 托管 |
 | 状态管理 | Pinia 2（setup store） | `reefStore` / `beltStore` / `surveyStore` |
 | 路由 | Vue Router 4（history 模式） | 路径与提示词逐字一致，支持深链刷新 |
-| 持久化 | Dexie 4（IndexedDB，库名 `gbcoralbelt`） | 结构版本 v2 + upgrade 迁移 + liveQuery 订阅 |
+| 持久化 | Dexie 4（IndexedDB，库名 `gbcoralbelt`） | 结构版本 v3 + upgrade 迁移 + liveQuery 订阅 |
 | 容器 | node:20-alpine 构建 → nginx:alpine 运行 | 多阶段构建，运行阶段 `chmod -R a+rX` |
 
 ## 三、路由与功能模块
@@ -45,6 +45,7 @@ docker compose up -d --build      # 修改代码后重新构建
 | `/belts/:id/corals` | 底质与珊瑚分类计数 | CoralRecord、Belt | 按属名与形态逐条录入覆盖长度与白化等级，汇总覆盖率、白化指数、白化占比与等级分布，批量粘贴、批量改级 |
 | `/belts/:id/fishes` | 鱼类与无脊椎动物计数 | FishCount、Belt | 按科名与体长段录入数量，按类别筛选与批量改类别，按科名和体长段汇总并折算密度（尾/100 m²） |
 | `/coverage` | 白化等级评定与覆盖度汇总 | 全部模型 | 白化等级分布与按样带/按礁区汇总、结构版本查看、全量 JSON 导入导出、清空重建演示数据 |
+| `/sync` | 离线调查合并中心 | 全部模型 + SyncBatch | 两组上岛回站后并入主台账：按名称/编号对齐，一边改过直接接收，两边都改保留两份标来源待选定，未选定前不进入覆盖度汇总；原批次留本机，失败可恢复 |
 
 带 `:id` 的层级路由在直接深链访问时同样可用：若 IndexedDB 中查不到该 id，页面渲染 `<RouteMissingPanel>` 友好空态（含返回入口与可用 id 快捷跳转），不会白屏。
 
@@ -69,16 +70,18 @@ sologsb101-1013/
     ├── public/favicon.svg
     └── src/
         ├── main.ts             # 挂载 Pinia / Router / Element Plus，并打开并播种数据库
-        ├── App.vue             # 顶部导航 + 上下文快捷入口 + 页脚数据概览
+        ├── App.vue             # 顶部导航 + 上下文快捷入口 + 页脚数据概览（含待选差异角标）
         ├── env.d.ts
-        ├── types/              # reef / site / belt / coralRecord / fishCount / filter
-        ├── stores/             # reefStore / beltStore / surveyStore
+        ├── types/              # reef / site / belt / coralRecord / fishCount / filter / sync（离线合并类型）
+        ├── stores/             # reefStore / beltStore / surveyStore / syncStore（合并批次订阅）
         ├── components/common/  # BleachTag / FilterBar / StatBadge / EmptyPanel / RouteMissingPanel
+        ├── components/sync/    # BatchStagingPanel / ConflictReviewPanel / BatchListPanel
         ├── hooks/              # useIdbTable / useCoverage
-        ├── pages/              # ReefList / SiteList / BeltBoard / CoralEntry / FishEntry / CoverageView
+        ├── pages/              # ReefList / SiteList / BeltBoard / CoralEntry / FishEntry / CoverageView / SyncCenter
         ├── router/index.ts     # 路由表（路径与提示词逐字一致）
         ├── styles/main.css
-        └── utils/              # bleach.ts（白化与覆盖度算法）/ db.ts（Dexie 封装）/ export.ts（导入导出与结论）
+        └── utils/              # bleach.ts（算法）/ db.ts（Dexie 封装 v3）/ export.ts（导入导出、离站拷贝）
+                              # merge.ts（三方对齐 / 指纹 / 冲突检测）/ syncService.ts（暂存、提交、选定、回滚）
 ```
 
 ## 五、本地开发
@@ -93,11 +96,17 @@ npm run preview    # 预览构建产物
 
 ## 六、数据存储说明
 
-- **存储位置**：浏览器 IndexedDB，库名 `gbcoralbelt`，当前结构版本 `v2`。读写统一经 `frontend/src/utils/db.ts` 封装，页面组件不直接触碰 Dexie 实例。
-- **数据表**：`reefs`（礁区）、`sites`（站位）、`belts`（样带）、`corals`（珊瑚记录）、`fishes`（鱼类与无脊椎动物计数）。
-- **升级迁移**：`db.version(1)` 保留初版结构，`db.version(2).stores(...).upgrade(...)` 补齐索引并回填历史数据缺失的时间戳与必填字段（面积、经纬度、水深、样带长度、覆盖长度、计数等）；调整字段结构时递增 `DB_VERSION` 并补迁移。
+- **存储位置**：浏览器 IndexedDB，库名 `gbcoralbelt`，当前结构版本 `v3`。读写统一经 `frontend/src/utils/db.ts` 封装，页面组件不直接触碰 Dexie 实例。
+- **数据表**：`reefs`（礁区）、`sites`（站位）、`belts`（样带）、`corals`（珊瑚记录）、`fishes`（鱼类与无脊椎动物计数）、`syncBatches`（离线合并批次）。
+- **升级迁移**：`db.version(1)` 保留初版结构，`db.version(2).stores(...).upgrade(...)` 补齐索引并回填历史数据缺失的时间戳与必填字段（面积、经纬度、水深、样带长度、覆盖长度、计数等）；`db.version(3)` 为五张业务表补 `source`（来源）/ `batchId`（批次）/ `pending`（未决）/ `conflictId`（冲突号）索引并新增 `syncBatches` 表，历史记录默认来源「主台账」、非未决。调整字段结构时递增 `DB_VERSION` 并补迁移。
 - **首屏播种**：`initDatabase()` 在 `reefs` 表为空时执行幂等播种，生成三层互相引用的演示数据（3 个礁区 / 4 个站位 / 5 条样带 / 14 条珊瑚记录 / 12 条计数记录），覆盖「无 / 轻 / 中 / 重 / 死亡」全部白化等级，保证每个页面打开都有内容、层级路由也能命中真实 id。
 - **实时同步**：`utils/db.ts` 的 `watchTable()` 基于 Dexie `liveQuery` 订阅表变化，Pinia store 自动刷新，页面只读消费。
 - **算法口径**：珊瑚覆盖率 = 覆盖长度合计 / 样带长度 × 100%；白化指数 = 按覆盖长度加权的平均白化等级（无 0 / 轻 1 / 中 2 / 重 3 / 死亡 4，0 ~ 4），并按指数换算总体等级；鱼类密度 = 计数 / （样带长度 × 1 m）× 100（尾/100 m²）。
-- **备份与恢复**：`/coverage` 页可导出包含五张表的 JSON 快照，支持「覆盖导入」与「追加导入（重新分配 id）」；备份时间写入 `localStorage`，页脚与汇总页均展示结构版本号。
+- **离线合并（两组上岛 → 回站部并账）**：
+  - **离站**：在 `/coverage` 选「上岛调查组离站拷贝」，导出带调查组名（`groupName`）与离站基线指纹（`base`）的 JSON；调查期间各组离线增改。
+  - **回站**：在 `/sync` 选择各组备份。礁区按名称、站位按「礁区+编号」、样带按「站位+编号」对齐，珊瑚/鱼类先按 id、再按业务键（属名+形态 / 科名+体长段+类别）补对齐。
+  - **三方判定**（主台账 / 离站基线 / 调查组）：仅调查组改过直接接收；仅主台账改过保留主台账；两边都改（或基线缺失且两边不一致）则**保留两份并标注来源**，行级 `pending=true`、共享 `conflictId`，在合并中心逐条或批量选定（父级选定时级联处理下属副本），**选定前不进入任何覆盖度 / 白化 / 密度汇总**。
+  - **失败恢复**：原批次文件完整存于 `syncBatches` 表；合并在单事务内完成，失败时五表不动、批次标 `failed`，刷新页面后仍可从批次列表重试或继续处理已确认内容与待选差异；也可下载原始批次或放弃批次（移除调查组副本）。
+  - **导出可追溯**：站部备份携带各批次摘要、行级来源与未决状态；离站拷贝携带 `base` 基线供回站三方对齐。
+- **备份与恢复**：`/coverage` 页可导出包含五张表（及批次摘要）的 JSON 快照，支持「覆盖导入」（清空业务表但保留合并批次）与「追加导入（重新分配 id，来源回落主台账）」；备份时间写入 `localStorage`，页脚与汇总页均展示结构版本号。
 - **离线可用**：应用为纯静态资源，无任何网络请求；换浏览器或清空站点数据后数据不跟随，需通过 JSON 备份迁移。

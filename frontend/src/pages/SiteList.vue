@@ -53,9 +53,9 @@ const rows = computed(() => {
     return true
   })
   return sites.map((site) => {
-    const belts = beltStore.beltsOfSite(site.id)
+    const belts = beltStore.beltsOfSite(site.id).filter((belt) => belt.pending !== true)
     const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
+    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId) && coral.pending !== true)
     const index = bleachIndex(corals)
     return {
       site,
@@ -278,7 +278,14 @@ onMounted(() => {
       />
 
       <el-table v-else :data="rows" border stripe class="gb-table-compact">
-        <el-table-column prop="site.no" label="站位编号" width="110" />
+        <el-table-column label="站位编号" width="160">
+          <template #default="{ row }">
+            <span class="gb-mono">{{ row.site.no }}</span>
+            <el-tag v-if="row.site.pending" size="small" type="warning" effect="plain" style="margin-left: 4px">
+              待选 · {{ row.site.source || '调查组' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="经纬度（十进制度）" min-width="200">
           <template #default="{ row }">
             <div class="gb-mono">{{ row.site.lat.toFixed(4) }}, {{ row.site.lng.toFixed(4) }}</div>

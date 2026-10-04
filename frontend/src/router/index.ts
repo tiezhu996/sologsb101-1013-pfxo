@@ -43,6 +43,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/CoverageView.vue'),
     meta: { title: '白化等级评定与覆盖度汇总', icon: 'PieChart' }
   },
+  {
+    path: '/sync',
+    name: 'sync-center',
+    component: () => import('@/pages/SyncCenter.vue'),
+    meta: { title: '离线调查合并中心', icon: 'Connection' }
+  },
   { path: '/:pathMatch(.*)*', redirect: '/reefs' }
 ]
 

@@ -35,24 +35,30 @@ import {
   countPayload,
   exportBackupJson,
   importBackup,
+  isPending,
   readFileText,
   remapIds,
   validateBackup,
   type CountMap
 } from '@/utils/export'
+import { useSyncStore } from '@/stores/syncStore'
 
 const route = useRoute()
 const router = useRouter()
 const reefStore = useReefStore()
 const surveyStore = useSurveyStore()
+const syncStore = useSyncStore()
 
 const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0 }
 
 const counts = ref<CountMap>(EMPTY_COUNTS)
+const pendingCounts = ref<CountMap>(EMPTY_COUNTS)
 const lastBackupAt = ref<string | null>(null)
 const stampedVersion = ref<number>(DB_VERSION)
 const reefSummaries = ref<ReturnType<typeof buildReefSummaries>>([])
 const overwriteOnImport = ref(true)
+const exportKind = ref<'station' | 'group'>('station')
+const groupName = ref('一组')
 const fileList = ref<UploadFile[]>([])
 const busy = ref(false)
 const notice = ref('')
@@ -100,7 +106,22 @@ function barPercent(value: number, total: number): string {
 }
 
 async function refresh(): Promise<void> {
-  counts.value = (await countAll()) as CountMap
+  const all = await countAll()
+  counts.value = {
+    reefs: all.reefs,
+    sites: all.sites,
+    belts: all.belts,
+    corals: all.corals,
+    fishes: all.fishes
+  }
+  const pending = {
+    reefs: surveyStore.reefs.filter((row) => isPending(row)).length,
+    sites: surveyStore.sites.filter((row) => isPending(row)).length,
+    belts: surveyStore.belts.filter((row) => isPending(row)).length,
+    corals: surveyStore.corals.filter((row) => isPending(row)).length,
+    fishes: surveyStore.fishes.filter((row) => isPending(row)).length
+  }
+  pendingCounts.value = pending
   lastBackupAt.value = readLastBackupAt()
   stampedVersion.value = readStampedDbVersion()
   const payload = await buildBackupPayload()
@@ -148,14 +169,17 @@ function handleReset(): void {
 async function handleExport(): Promise<void> {
   busy.value = true
   try {
-    const result = await exportBackupJson()
+    const result = await exportBackupJson(exportKind.value, groupName.value)
     await refresh()
-    notice.value = `已导出 ${result.fileName}（共 ${Object.values(result.counts).reduce((sum, value) => sum + value, 0)} 条记录）。`
+    const kindLabel = exportKind.value === 'group' ? `上岛调查组离站拷贝（${groupName.value}，含离站基线）` : '站部主台账备份'
+    notice.value = `已导出${kindLabel} ${result.fileName}（共 ${Object.values(result.counts).reduce((sum, value) => sum + value, 0)} 条记录，含批次/来源/未决状态）。`
     ElMessage.success(notice.value)
   } finally {
     busy.value = false
   }
 }
+
+const pendingTotal = computed(() => Object.values(pendingCounts.value).reduce((sum, value) => sum + value, 0))
 
 async function handleImport(): Promise<void> {
   const file = fileList.value[0]?.raw
@@ -231,6 +255,7 @@ async function copySummary(): Promise<void> {
 }
 
 onMounted(() => {
+  syncStore.start()
   surveyStore.patchFilter({
     keyword: typeof route.query.kw === 'string' ? route.query.kw : '',
     reefIds: queryToArray(route.query.reef),
@@ -260,6 +285,21 @@ onMounted(() => {
     </div>
 
     <el-alert v-if="notice" type="success" :closable="false" show-icon :title="notice" />
+
+    <el-alert
+      v-if="pendingTotal > 0"
+      type="warning"
+      show-icon
+      :closable="false"
+      style="margin-bottom: 2px"
+    >
+      <template #title>
+        有 {{ pendingTotal }} 行离线合并的待选记录尚未选定（礁区 {{ pendingCounts.reefs }} / 站位
+        {{ pendingCounts.sites }} / 样带 {{ pendingCounts.belts }} / 珊瑚 {{ pendingCounts.corals }} / 鱼类
+        {{ pendingCounts.fishes }}），当前覆盖度汇总不含这些记录。
+        <router-link to="/sync" style="margin-left: 8px">前往离线合并中心选定 →</router-link>
+      </template>
+    </el-alert>
 
     <div class="gb-stats-row">
       <StatBadge label="样带数" :value="totals.belts" suffix="条" icon="Files" />
@@ -440,15 +480,26 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>结构版本与全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 reefs / sites / belts / corals / fishes 五张表 · 最近备份
+          导出内容包含 reefs / sites / belts / corals / fishes 五张表及行级来源、合并批次与未决标记；离站拷贝另带 base 基线 ·
+          本机批次 {{ syncStore.batches.length }} 个 · 待选差异
+          {{ syncStore.openConflictCount }} 组 · 最近备份
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </span>
       </div>
 
       <el-form label-width="120px">
+        <el-form-item label="备份用途">
+          <el-radio-group v-model="exportKind">
+            <el-radio value="station">站部主台账备份（携带批次摘要、来源与未决状态）</el-radio>
+            <el-radio value="group">上岛调查组离站拷贝（携带来源名与离站基线，供回站合并）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="exportKind === 'group'" label="调查组名称">
+          <el-input v-model="groupName" placeholder="如：一组 / 二组" maxlength="20" style="max-width: 260px" />
+        </el-form-item>
         <el-form-item label="导入模式">
           <el-radio-group v-model="overwriteOnImport">
-            <el-radio :value="true">覆盖（先清空本地数据）</el-radio>
+            <el-radio :value="true">覆盖（先清空本地业务数据，合并批次保留在本机）</el-radio>
             <el-radio :value="false">追加（重新分配 id）</el-radio>
           </el-radio-group>
         </el-form-item>
@@ -478,7 +529,11 @@ onMounted(() => {
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}（浏览器记录 v{{ stampedVersion }}）</el-descriptions-item>
         <el-descriptions-item label="礁区 / 站位">{{ counts.reefs }} / {{ counts.sites }}</el-descriptions-item>
         <el-descriptions-item label="样带 / 珊瑚记录">{{ counts.belts }} / {{ counts.corals }}</el-descriptions-item>
-        <el-descriptions-item label="鱼类计数">{{ counts.fishes }}</el-descriptions-item>
+        <el-descriptions-item label="鱼类计数">{{ counts.fishes }}（未决 {{ pendingCounts.fishes }}）</el-descriptions-item>
+        <el-descriptions-item label="合并批次 / 待选">
+          {{ syncStore.batches.length }} 个 / {{ syncStore.openConflictCount }} 组
+          <router-link to="/sync" style="margin-left: 6px">处理</router-link>
+        </el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </el-descriptions-item>
