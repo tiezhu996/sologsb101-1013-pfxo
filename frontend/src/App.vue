@@ -9,6 +9,7 @@ import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-v
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useMergeStore } from '@/stores/mergeStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,11 +17,13 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const mergeStore = useMergeStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  mergeStore.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
@@ -109,6 +112,11 @@ function go(path: string): void {
       <span>
         礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
         {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+      </span>
+      <span>
+        <el-button v-if="mergeStore.pendingCount > 0" size="small" type="warning" plain @click="go('/coverage')">
+          {{ mergeStore.pendingCount }} 条离线合并待决差异，选定前不计入覆盖度 →
+        </el-button>
       </span>
     </footer>
   </div>

@@ -13,6 +13,7 @@ import BleachTag from '@/components/common/BleachTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
+import SourceTag from '@/components/common/SourceTag.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -52,9 +53,15 @@ const form = reactive({
   remark: ''
 })
 
-const records = computed(() => surveyStore.coralsOfBelt(beltId.value))
+const allRecords = computed(() => surveyStore.coralsOfBelt(beltId.value))
 
-/** 按属名分组汇总 */
+/** 进入覆盖度口径的已确认记录（待决副本选定前不计入统计） */
+const records = computed(() => allRecords.value.filter((record) => record.mergeStatus !== 'pending'))
+
+/** 待决差异副本（仍在表内展示并标来源，供操作员识别） */
+const pendingRecords = computed(() => allRecords.value.filter((record) => record.mergeStatus === 'pending'))
+
+/** 按属名分组汇总（仅已确认） */
 const genusGroups = computed(() =>
   groupByGenus(records.value).map((group) => {
     const list = records.value.filter((record) => record.genus === group.genus)
@@ -179,6 +186,11 @@ function toggleSelectAll(): void {
     selectedIds.value.length === records.value.length ? [] : records.value.map((record) => record.id)
 }
 
+/** 待决差异副本行高亮（选定前不进汇总） */
+function pendingRowClass({ row }: { row: CoralRecord }): string {
+  return row.mergeStatus === 'pending' ? 'row-pending' : ''
+}
+
 async function bulkSetLevel(level: BleachLevel): Promise<void> {
   if (selectedIds.value.length === 0) {
     ElMessage.warning('请先勾选要批量改级的记录')
@@ -295,6 +307,15 @@ onMounted(() => {
         <StatBadge label="白化占比" :value="stats.bleachedSharePct" suffix="%" tone="warning" icon="TrendCharts" />
       </div>
 
+      <el-alert
+        v-if="pendingRecords.length > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="page__pending-alert"
+        :title="`该样带有 ${pendingRecords.length} 条离线合并待决差异（下表中橙色标记），请到覆盖度汇总页的离线合并中心选定，选定前不计入覆盖率与白化指数。`"
+      />
+
       <el-card v-if="records.length > 0" shadow="never" class="gb-panel">
         <div class="gb-panel-title">
           <h3>汇总视图</h3>
@@ -358,7 +379,7 @@ onMounted(() => {
       </el-card>
 
       <EmptyPanel
-        v-if="records.length === 0"
+        v-if="allRecords.length === 0"
         title="该样带还没有珊瑚记录"
         description="按属名与形态逐条录入覆盖长度与白化等级；也可以批量粘贴导入整段摸底数据。"
         action-text="新增珊瑚记录"
@@ -367,13 +388,22 @@ onMounted(() => {
         @secondary="openPaste"
       />
 
-      <el-table v-else :data="records" border stripe class="gb-table-compact">
+      <el-table v-else :data="allRecords" border stripe class="gb-table-compact" :row-class-name="pendingRowClass">
         <el-table-column label="选择" width="70" align="center">
           <template #default="{ row }">
-            <el-checkbox :model-value="selectedIds.includes(row.id)" @change="() => toggleSelect(row.id)" />
+            <el-checkbox
+              :model-value="selectedIds.includes(row.id)"
+              :disabled="row.mergeStatus === 'pending'"
+              @change="() => toggleSelect(row.id)"
+            />
           </template>
         </el-table-column>
-        <el-table-column prop="genus" label="属名" min-width="140" />
+        <el-table-column label="属名 / 来源" min-width="180">
+          <template #default="{ row }">
+            <div>{{ row.genus }}</div>
+            <SourceTag :source="row.source" :merge-status="row.mergeStatus" show-confirmed-source />
+          </template>
+        </el-table-column>
         <el-table-column prop="form" label="形态" width="100" />
         <el-table-column label="覆盖长度 (cm)" width="140" align="right">
           <template #default="{ row }">
@@ -400,7 +430,7 @@ onMounted(() => {
         </template>
       </el-table>
 
-      <p v-if="records.length > 0" class="gb-hint">
+      <p v-if="allRecords.length > 0" class="gb-hint">
           <el-button size="small" text type="primary" @click="toggleSelectAll">
             {selectedIds.length === records.length ? '取消全选' : '全选本页'}
           </el-button>
@@ -551,5 +581,13 @@ onMounted(() => {
   margin-top: 10px;
   max-height: 160px;
   overflow: auto;
+}
+
+.page__pending-alert {
+  margin-bottom: 4px;
+}
+
+:deep(.el-table .row-pending) {
+  background: #fff7ec;
 }
 </style>

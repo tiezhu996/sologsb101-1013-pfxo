@@ -12,6 +12,7 @@ import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import BleachTag from '@/components/common/BleachTag.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
+import SourceTag from '@/components/common/SourceTag.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -41,11 +42,14 @@ const form = reactive({
   observer: ''
 })
 
-/** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数 */
+/** 样带行：回显已确认珊瑚/鱼类记录数、覆盖率与白化指数（待决差异选定前不计入） */
 const rows = computed(() =>
   beltStore.beltsOfSite(siteId.value).map((belt) => {
-    const corals = surveyStore.coralsOfBelt(belt.id)
-    const fishes = surveyStore.fishesOfBelt(belt.id)
+    const corals = surveyStore.coralsOfBelt(belt.id).filter((coral) => coral.mergeStatus !== 'pending')
+    const fishes = surveyStore.fishesOfBelt(belt.id).filter((fish) => fish.mergeStatus !== 'pending')
+    const pendingCount =
+      surveyStore.coralsOfBelt(belt.id).filter((coral) => coral.mergeStatus === 'pending').length +
+      surveyStore.fishesOfBelt(belt.id).filter((fish) => fish.mergeStatus === 'pending').length
     const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
     const index = bleachIndex(corals)
     const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
@@ -53,6 +57,7 @@ const rows = computed(() =>
       belt,
       coralCount: corals.length,
       fishCount: fishes.length,
+      pendingCount,
       coverCmTotal,
       coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
       bleachIndex: index,
@@ -67,8 +72,15 @@ const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value))
 const stats = computed(() => {
   const belts = beltStore.beltsOfSite(siteId.value)
   const totalLength = belts.reduce((sum, belt) => sum + belt.lengthM, 0)
-  const coralCount = belts.reduce((sum, belt) => sum + surveyStore.coralsOfBelt(belt.id).length, 0)
-  const fishCount = belts.reduce((sum, belt) => sum + surveyStore.fishesOfBelt(belt.id).length, 0)
+  const coralCount = belts.reduce(
+    (sum, belt) =>
+      sum + surveyStore.coralsOfBelt(belt.id).filter((coral) => coral.mergeStatus !== 'pending').length,
+    0
+  )
+  const fishCount = belts.reduce(
+    (sum, belt) => sum + surveyStore.fishesOfBelt(belt.id).filter((fish) => fish.mergeStatus !== 'pending').length,
+    0
+  )
   return {
     beltCount: belts.length,
     totalLength,
@@ -264,7 +276,12 @@ onMounted(() => {
       />
 
       <el-table v-else :data="rows" border stripe class="gb-table-compact">
-        <el-table-column prop="belt.no" label="样带编号" width="110" />
+        <el-table-column label="样带编号" width="150">
+          <template #default="{ row }">
+            <div>{{ row.belt.no }}</div>
+            <SourceTag :source="row.belt.source" :merge-status="row.belt.mergeStatus" show-confirmed-source />
+          </template>
+        </el-table-column>
         <el-table-column label="朝向" width="90" align="center">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.belt.orientation }}</el-tag>
@@ -286,6 +303,7 @@ onMounted(() => {
             <el-button text type="primary" size="small" @click="gotoCorals(row.belt)">
               {{ row.coralCount }} 条
             </el-button>
+            <div v-if="row.pendingCount > 0" class="gb-hint" style="color: #b95c00">＋{{ row.pendingCount }} 待决</div>
           </template>
         </el-table-column>
         <el-table-column label="鱼类计数" width="120" align="center">

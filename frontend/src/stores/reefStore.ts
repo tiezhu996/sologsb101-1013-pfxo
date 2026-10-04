@@ -4,7 +4,7 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { db, createId, readLastReefId, watchTable, writeLastReefId } from '@/utils/db'
+import { db, createId, readLastReefId, watchTable, writeLastReefId, MASTER_BATCH_ID } from '@/utils/db'
 import type { Reef, ReefFilterState } from '@/types/reef'
 import { createEmptyReefFilter } from '@/types/reef'
 import type { Site, SiteFilterState } from '@/types/site'
@@ -141,9 +141,22 @@ export const useReefStore = defineStore('reef', () => {
 
   /* ------------------------------- 礁区 ------------------------------- */
 
-  async function createReef(payload: Omit<Reef, 'id' | 'createdAt' | 'updatedAt'>): Promise<Reef> {
+  async function createReef(
+    payload: Omit<Reef, 'id' | 'createdAt' | 'updatedAt' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>
+  ): Promise<Reef> {
     const now = Date.now()
-    const row: Reef = { ...payload, id: createId('reef'), createdAt: now, updatedAt: now }
+    const id = createId('reef')
+    const row: Reef = {
+      ...payload,
+      id,
+      source: '站部主台账',
+      batchId: MASTER_BATCH_ID,
+      mergeStatus: 'confirmed',
+      conflictId: null,
+      originId: id,
+      createdAt: now,
+      updatedAt: now
+    }
     await db.reefs.put(row)
     return row
   }
@@ -172,9 +185,22 @@ export const useReefStore = defineStore('reef', () => {
 
   /* ------------------------------- 站位 ------------------------------- */
 
-  async function createSite(payload: Omit<Site, 'id' | 'createdAt' | 'updatedAt'>): Promise<Site> {
+  async function createSite(
+    payload: Omit<Site, 'id' | 'createdAt' | 'updatedAt' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>
+  ): Promise<Site> {
     const now = Date.now()
-    const row: Site = { ...payload, id: createId('site'), createdAt: now, updatedAt: now }
+    const id = createId('site')
+    const row: Site = {
+      ...payload,
+      id,
+      source: '站部主台账',
+      batchId: MASTER_BATCH_ID,
+      mergeStatus: 'confirmed',
+      conflictId: null,
+      originId: id,
+      createdAt: now,
+      updatedAt: now
+    }
     await db.sites.put(row)
     return row
   }
@@ -197,16 +223,24 @@ export const useReefStore = defineStore('reef', () => {
     if (currentSiteId.value === id) selectSite(null)
   }
 
-  /** 站位 id → 样带数与平均白化指数（列表回显用） */
+  /** 站位 id → 样带数与平均白化指数（列表回显用；待决记录选定前不计入） */
   async function siteBleachAverages(): Promise<Record<string, number>> {
     const result: Record<string, number> = {}
     for (const site of sites.value) {
-      const beltIds = (await db.belts.where('siteId').equals(site.id).toArray()).map((row) => row.id)
+      if (site.mergeStatus === 'pending') continue
+      const beltIds = (await db.belts
+        .where('siteId')
+        .equals(site.id)
+        .toArray())
+        .filter((belt) => belt.mergeStatus !== 'pending')
+        .map((row) => row.id)
       if (beltIds.length === 0) {
-        result[site.id] = 0
+        result[site.id] =0
         continue
       }
-      const corals = await db.corals.where('beltId').anyOf(beltIds).toArray()
+      const corals = (await db.corals.where('beltId').anyOf(beltIds).toArray()).filter(
+        (coral) => coral.mergeStatus !== 'pending'
+      )
       result[site.id] = round(bleachIndex(corals), 2)
     }
     return result

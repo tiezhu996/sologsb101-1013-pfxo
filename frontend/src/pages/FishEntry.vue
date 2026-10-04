@@ -11,6 +11,7 @@ import { Delete, DocumentCopy, Edit, Plus } from '@element-plus/icons-vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
+import SourceTag from '@/components/common/SourceTag.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -50,19 +51,37 @@ const form = reactive({
   category: '鱼类' as CountCategory
 })
 
+const allRecords = computed(() => surveyStore.fishesOfBelt(beltId.value))
+
+/** 进入密度口径的已确认记录（待决副本选定前不计入统计） */
+const confirmedList = computed(() => allRecords.value.filter((record) => record.mergeStatus !== 'pending'))
+const pendingRecords = computed(() => allRecords.value.filter((record) => record.mergeStatus === 'pending'))
+
 const records = computed(() => {
-  const list = surveyStore.fishesOfBelt(beltId.value)
+  const list = allRecords.value
   if (categoryFilter.value === '全部') return list
   return list.filter((record) => record.category === categoryFilter.value)
 })
 
-/** 按科名 + 体长段汇总 */
-const summary = computed(() => surveyStore.fishSummaryOfBelt(beltId.value))
+/** 按科名 + 体长段汇总（仅已确认） */
+const summary = computed(() => {
+  // fishSummaryOfBelt 不区分待决，这里基于已确认列表自行汇总
+  const map = new Map<string, { family: string; category: CountCategory; total: number; bySize: Record<SizeClass, number> }>()
+  confirmedList.value.forEach((fish) => {
+    const bucket =
+      map.get(fish.family) ??
+      { family: fish.family, category: fish.category, total: 0, bySize: { '0-10cm': 0, '11-20cm': 0, '21-30cm': 0, '>30cm': 0 } }
+    bucket.total += fish.count
+    bucket.bySize[fish.sizeClass] += fish.count
+    map.set(fish.family, bucket)
+  })
+  return Array.from(map.values()).sort((a, b) => b.total - a.total)
+})
 
-/** 按体长段汇总（鱼类与无脊椎动物合计） */
+/** 按体长段汇总（鱼类与无脊椎动物合计，仅已确认） */
 const sizeSummary = computed(() =>
   SIZE_CLASSES.map((sizeClass) => {
-    const list = surveyStore.fishesOfBelt(beltId.value).filter((record) => record.sizeClass === sizeClass)
+    const list = confirmedList.value.filter((record) => record.sizeClass === sizeClass)
     return {
       sizeClass,
       count: list.reduce((sum, record) => sum + record.count, 0),
@@ -72,14 +91,15 @@ const sizeSummary = computed(() =>
 )
 
 const stats = computed(() => {
-  const list = surveyStore.fishesOfBelt(beltId.value)
+  const list = confirmedList.value
   const fishTotal = list.filter((record) => record.category === '鱼类').reduce((sum, record) => sum + record.count, 0)
   const invertebrateTotal = list
     .filter((record) => record.category === '无脊椎动物')
     .reduce((sum, record) => sum + record.count, 0)
   const lengthM = belt.value?.lengthM ?? 0
   return {
-    recordCount: list.length,
+    recordCount: allRecords.value.length,
+    confirmedCount: list.length,
     fishTotal,
     invertebrateTotal,
     total: fishTotal + invertebrateTotal,
@@ -159,8 +179,16 @@ function toggleSelect(id: string): void {
 }
 
 function toggleSelectAll(): void {
+  const selectable = records.value.filter((record) => record.mergeStatus !== 'pending')
   selectedIds.value =
-    selectedIds.value.length === records.value.length ? [] : records.value.map((record) => record.id)
+    selectedIds.value.length === selectable.length && selectable.length > 0
+      ? []
+      : selectable.map((record) => record.id)
+}
+
+/** 待决差异副本行高亮（选定前不进密度汇总） */
+function pendingRowClass({ row }: { row: FishCount }): string {
+  return row.mergeStatus === 'pending' ? 'row-pending' : ''
 }
 
 async function bulkSetCategory(category: CountCategory): Promise<void> {
@@ -280,6 +308,15 @@ onMounted(() => {
         <StatBadge label="科名数" :value="stats.familyCount" suffix="科" tone="default" icon="Files" />
       </div>
 
+      <el-alert
+        v-if="pendingRecords.length > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="page__pending-alert"
+        :title="`该样带有 ${pendingRecords.length} 条离线合并待决差异（下表中橙色标记），请到覆盖度汇总页的离线合并中心选定，选定前不计入鱼类密度。`"
+      />
+
       <el-card v-if="stats.recordCount > 0" shadow="never" class="gb-panel">
         <div class="gb-panel-title">
           <h3>汇总视图</h3>
@@ -348,7 +385,7 @@ onMounted(() => {
           <el-radio-button v-for="category in COUNT_CATEGORIES" :key="category" :value="category">{{ category }}</el-radio-button>
         </el-radio-group>
         <el-button size="small" text type="primary" @click="toggleSelectAll">
-          {{ selectedIds.length === records.length && records.length > 0 ? '取消全选' : '全选本页' }}
+          {{ selectedIds.length === confirmedList.length && confirmedList.length > 0 ? '取消全选' : '全选本页' }}
         </el-button>
         <span class="gb-hint">已选 {{ selectedIds.length }} 条</span>
       </div>
@@ -363,13 +400,22 @@ onMounted(() => {
         @secondary="openPaste"
       />
 
-      <el-table v-else :data="records" border stripe class="gb-table-compact">
+      <el-table v-else :data="records" border stripe class="gb-table-compact" :row-class-name="pendingRowClass">
         <el-table-column label="选择" width="70" align="center">
           <template #default="{ row }">
-            <el-checkbox :model-value="selectedIds.includes(row.id)" @change="() => toggleSelect(row.id)" />
+            <el-checkbox
+              :model-value="selectedIds.includes(row.id)"
+              :disabled="row.mergeStatus === 'pending'"
+              @change="() => toggleSelect(row.id)"
+            />
           </template>
         </el-table-column>
-        <el-table-column prop="family" label="科名" min-width="140" />
+        <el-table-column label="科名 / 来源" min-width="180">
+          <template #default="{ row }">
+            <div>{{ row.family }}</div>
+            <SourceTag :source="row.source" :merge-status="row.mergeStatus" show-confirmed-source />
+          </template>
+        </el-table-column>
         <el-table-column label="类别" width="120">
           <template #default="{ row }">
             <el-tag size="small" :type="row.category === '鱼类' ? 'primary' : 'warning'" effect="plain">
@@ -521,5 +567,13 @@ onMounted(() => {
   margin-top: 10px;
   max-height: 160px;
   overflow: auto;
+}
+
+.page__pending-alert {
+  margin-bottom: 4px;
+}
+
+:deep(.el-table .row-pending) {
+  background: #fff7ec;
 }
 </style>

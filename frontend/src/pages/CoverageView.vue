@@ -8,15 +8,17 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
-import { Download, Refresh, Upload } from '@element-plus/icons-vue'
+import { Download, Refresh, Upload, Connection } from '@element-plus/icons-vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import type { FilterModel } from '@/types/filter'
 import { buildQuery, queryToArray, queryToBool } from '@/types/filter'
 import BleachTag from '@/components/common/BleachTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
+import MergeCenter from '@/components/common/MergeCenter.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useMergeStore } from '@/stores/mergeStore'
 import { BLEACH_LEVELS } from '@/types/coralRecord'
 import type { BleachLevel } from '@/types/coralRecord'
 import { BLEACH_COLOR } from '@/utils/bleach'
@@ -45,6 +47,7 @@ const route = useRoute()
 const router = useRouter()
 const reefStore = useReefStore()
 const surveyStore = useSurveyStore()
+const mergeStore = useMergeStore()
 
 const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0 }
 
@@ -52,10 +55,14 @@ const counts = ref<CountMap>(EMPTY_COUNTS)
 const lastBackupAt = ref<string | null>(null)
 const stampedVersion = ref<number>(DB_VERSION)
 const reefSummaries = ref<ReturnType<typeof buildReefSummaries>>([])
-const overwriteOnImport = ref(true)
+const importMode = ref<'overwrite' | 'append' | 'merge'>('merge')
 const fileList = ref<UploadFile[]>([])
 const busy = ref(false)
 const notice = ref('')
+const mergeCenterVisible = ref(false)
+/** 导出角色：站部派发（带基线）/ 离线组带回（沿用基线） */
+const exportRole = ref<'station' | 'team'>('station')
+const exportSource = ref('甲组')
 
 const filterModel = computed<FilterModel>(() => ({
   keyword: surveyStore.filter.keyword,
@@ -148,9 +155,12 @@ function handleReset(): void {
 async function handleExport(): Promise<void> {
   busy.value = true
   try {
-    const result = await exportBackupJson()
+    const result = await exportBackupJson({
+      role: exportRole.value,
+      source: exportRole.value === 'team' ? exportSource.value.trim() : undefined
+    })
     await refresh()
-    notice.value = `已导出 ${result.fileName}（共 ${Object.values(result.counts).reduce((sum, value) => sum + value, 0)} 条记录）。`
+    notice.value = `已导出 ${result.fileName}（来源「${result.source}」，共 ${Object.values(result.counts).reduce((sum, value) => sum + value, 0)} 条已确认记录，含批次 / 来源 / 未决状态）。`
     ElMessage.success(notice.value)
   } finally {
     busy.value = false
@@ -161,6 +171,11 @@ async function handleImport(): Promise<void> {
   const file = fileList.value[0]?.raw
   if (!file) {
     ElMessage.warning('请先选择备份 JSON 文件')
+    return
+  }
+  // 离线合并交给合并中心处理（保留待决差异、失败可恢复）
+  if (importMode.value === 'merge') {
+    mergeCenterVisible.value = true
     return
   }
   busy.value = true
@@ -178,16 +193,17 @@ async function handleImport(): Promise<void> {
       ElMessage.error(`备份校验失败：${validation.errors.join('；')}`)
       return
     }
-    const payload: BackupPayload = overwriteOnImport.value ? validation.payload : remapIds(validation.payload)
+    const overwrite = importMode.value === 'overwrite'
+    const payload: BackupPayload = overwrite ? validation.payload : remapIds(validation.payload)
     const summary = countPayload(payload)
     await ElMessageBox.confirm(
       `将导入 ${Object.entries(summary)
         .map(([key, value]) => `${key} ${value} 条`)
-        .join('、')}；${overwriteOnImport.value ? '覆盖模式会先清空现有本地数据' : '追加模式会重新分配 id 保留现有数据'}。确认继续？`,
+        .join('、')}；${overwrite ? '覆盖模式会先清空现有本地数据（含合并留痕）' : '追加模式会重新分配 id 保留现有数据'}。确认继续？`,
       '导入确认',
       { type: 'warning', confirmButtonText: '继续导入', cancelButtonText: '取消' }
     )
-    await importBackup(payload, overwriteOnImport.value)
+    await importBackup(payload, overwrite)
     await refresh()
     notice.value = '导入完成，覆盖度汇总已刷新。'
     ElMessage.success(notice.value)
@@ -255,11 +271,28 @@ onMounted(() => {
       <div class="page__actions">
         <el-button :icon="Refresh" @click="refresh">刷新</el-button>
         <el-button @click="copySummary">复制结论</el-button>
+        <el-button type="warning" plain :icon="Connection" @click="mergeCenterVisible = true">
+          离线合并中心
+          <el-badge v-if="mergeStore.pendingCount > 0" :value="mergeStore.pendingCount" class="page__merge-badge" />
+        </el-button>
         <el-button type="primary" :icon="Download" :loading="busy" @click="handleExport">导出 JSON</el-button>
       </div>
     </div>
 
     <el-alert v-if="notice" type="success" :closable="false" show-icon :title="notice" />
+
+    <el-alert
+      v-if="mergeStore.pendingCount > 0"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="page__pending-alert"
+    >
+      <template #title>
+        有 {{ mergeStore.pendingCount }} 条离线合并待决差异（两边都改过、已各保留一份），选定前不计入下方覆盖度汇总。
+        <el-button type="warning" size="small" plain @click="mergeCenterVisible = true">前往离线合并中心选定</el-button>
+      </template>
+    </el-alert>
 
     <div class="gb-stats-row">
       <StatBadge label="样带数" :value="totals.belts" suffix="条" icon="Files" />
@@ -436,20 +469,36 @@ onMounted(() => {
       </el-table>
     </el-card>
 
+    <MergeCenter v-model="mergeCenterVisible" @merged="refresh" />
+
     <el-card shadow="never" class="gb-panel">
       <div class="gb-panel-title">
         <h3>结构版本与全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 reefs / sites / belts / corals / fishes 五张表 · 最近备份
+          导出内容包含 reefs / sites / belts / corals / fishes 五张表及批次、来源、未决状态 · 最近备份
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </span>
       </div>
 
       <el-form label-width="120px">
+        <el-form-item label="导出身份">
+          <el-radio-group v-model="exportRole">
+            <el-radio value="station">站部派发（基线快照，交给普查组）</el-radio>
+            <el-radio value="team">离线组带回（沿用基线，回站部合并）</el-radio>
+          </el-radio-group>
+          <el-input
+            v-if="exportRole === 'team'"
+            v-model="exportSource"
+            placeholder="本组来源，如：甲组"
+            maxlength="20"
+            style="max-width: 220px; margin-left: 12px"
+          />
+        </el-form-item>
         <el-form-item label="导入模式">
-          <el-radio-group v-model="overwriteOnImport">
-            <el-radio :value="true">覆盖（先清空本地数据）</el-radio>
-            <el-radio :value="false">追加（重新分配 id）</el-radio>
+          <el-radio-group v-model="importMode">
+            <el-radio value="merge">离线合并（按名称/编号对齐，两边都改留两份待选定）</el-radio>
+            <el-radio value="overwrite">覆盖（先清空本地数据）</el-radio>
+            <el-radio value="append">追加（重新分配 id）</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="选择备份文件">
@@ -467,7 +516,9 @@ onMounted(() => {
           </el-upload>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :icon="Upload" :loading="busy" @click="handleImport">开始导入</el-button>
+          <el-button type="primary" :icon="Upload" :loading="busy" @click="handleImport">
+            {{ importMode === 'merge' ? '进入离线合并中心' : '开始导入' }}
+          </el-button>
           <el-button :icon="Download" @click="handleExport">导出当前数据</el-button>
           <el-button type="danger" plain @click="handleDatabaseReset">清空并重建演示数据</el-button>
         </el-form-item>
@@ -476,6 +527,7 @@ onMounted(() => {
       <el-descriptions :column="3" border size="small">
         <el-descriptions-item label="本地库名">{{ DB_NAME }}</el-descriptions-item>
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}（浏览器记录 v{{ stampedVersion }}）</el-descriptions-item>
+        <el-descriptions-item label="待决差异">{{ mergeStore.pendingCount }} 条</el-descriptions-item>
         <el-descriptions-item label="礁区 / 站位">{{ counts.reefs }} / {{ counts.sites }}</el-descriptions-item>
         <el-descriptions-item label="样带 / 珊瑚记录">{{ counts.belts }} / {{ counts.corals }}</el-descriptions-item>
         <el-descriptions-item label="鱼类计数">{{ counts.fishes }}</el-descriptions-item>
@@ -485,6 +537,7 @@ onMounted(() => {
       </el-descriptions>
       <p class="gb-hint">
         数据仅保存在当前浏览器 IndexedDB 中，换浏览器或清空站点数据后不会自动跟随，请通过 JSON 备份迁移。
+        待决差异在选定前不进入覆盖度汇总；合并失败时原批次与已接收内容保留在本机，可恢复后接着处理。
       </p>
     </el-card>
   </section>
@@ -529,5 +582,13 @@ onMounted(() => {
 .page__mini-bar {
   display: block;
   height: 100%;
+}
+
+.page__merge-badge {
+  margin-left: 6px;
+}
+
+.page__pending-alert {
+  margin-bottom: 4px;
 }
 </style>

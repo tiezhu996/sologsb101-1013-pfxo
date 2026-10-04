@@ -4,7 +4,7 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { db, createId, watchTable } from '@/utils/db'
+import { db, createId, watchTable, MASTER_BATCH_ID } from '@/utils/db'
 import type { BleachLevel, CoralForm, CoralRecord } from '@/types/coralRecord'
 import { BLEACH_LEVELS } from '@/types/coralRecord'
 import type { CountCategory, FishCount, SizeClass } from '@/types/fishCount'
@@ -125,26 +125,34 @@ export const useSurveyStore = defineStore('survey', () => {
       .sort((a, b) => b.count - a.count)
   }
 
-  /** 样带 id → 珊瑚记录数 / 鱼类记录数（样带列表回显用） */
+  /** 样带 id → 珊瑚记录数 / 鱼类记录数（仅已确认，待决副本不计入回显统计） */
   const beltRecordCounts = computed<Record<string, { coralCount: number; fishCount: number }>>(() => {
     const counts: Record<string, { coralCount: number; fishCount: number }> = {}
     belts.value.forEach((belt) => {
       counts[belt.id] = {
-        coralCount: corals.value.filter((coral) => coral.beltId === belt.id).length,
-        fishCount: fishes.value.filter((fish) => fish.beltId === belt.id).length
+        coralCount: corals.value.filter((coral) => coral.beltId === belt.id && coral.mergeStatus !== 'pending').length,
+        fishCount: fishes.value.filter((fish) => fish.beltId === belt.id && fish.mergeStatus !== 'pending').length
       }
     })
     return counts
   })
 
-  /** 覆盖度汇总行（全部样带） */
-  const coverageRows = computed<CoverageSummaryRow[]>(() =>
-    belts.value
+  /** 覆盖度汇总行（全部样带；待决差异与待决样带在选定前不进入汇总） */
+  const coverageRows = computed<CoverageSummaryRow[]>(() => {
+    const pendingSiteIds = new Set(sites.value.filter((site) => site.mergeStatus === 'pending').map((site) => site.id))
+    return belts.value
+      .filter((belt) => belt.mergeStatus !== 'pending' && !pendingSiteIds.has(belt.siteId))
       .map((belt) => {
-        const site = sites.value.find((item) => item.id === belt.siteId)
-        const reef = site ? reefs.value.find((item) => item.id === site.reefId) : undefined
-        const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
-        const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
+        const site = sites.value.find((item) => item.id === belt.siteId && item.mergeStatus !== 'pending')
+        const reef = site
+          ? reefs.value.find((item) => item.id === site.reefId && item.mergeStatus !== 'pending')
+          : undefined
+        const beltCorals = corals.value.filter(
+          (coral) => coral.beltId === belt.id && coral.mergeStatus !== 'pending'
+        )
+        const beltFishes = fishes.value.filter(
+          (fish) => fish.beltId === belt.id && fish.mergeStatus !== 'pending'
+        )
         const coverCmTotal = round(
           beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
           1
@@ -184,7 +192,11 @@ export const useSurveyStore = defineStore('survey', () => {
         }
       })
       .sort((a, b) => b.bleachIndex - a.bleachIndex)
-  )
+  })
+
+  /** 已确认的珊瑚 / 鱼类记录（待决副本不参与覆盖度与密度计算） */
+  const confirmedCorals = computed(() => corals.value.filter((coral) => coral.mergeStatus !== 'pending'))
+  const confirmedFishes = computed(() => fishes.value.filter((fish) => fish.mergeStatus !== 'pending'))
 
   /** 按筛选条件过滤后的覆盖度行 */
   const filteredCoverageRows = computed<CoverageSummaryRow[]>(() =>
@@ -212,26 +224,26 @@ export const useSurveyStore = defineStore('survey', () => {
       filter.value.onlyBleached
   )
 
-  /** 全局白化等级分布与总体指数 */
+  /** 全局白化等级分布与总体指数（仅已确认记录） */
   const globalStats = computed(() => {
     const distribution: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        confirmedCorals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
     })
-    const index = bleachIndex(corals.value)
+    const index = bleachIndex(confirmedCorals.value)
     return {
-      coralCount: corals.value.length,
-      fishCount: fishes.value.length,
+      coralCount: confirmedCorals.value.length,
+      fishCount: confirmedFishes.value.length,
       coverCmTotal: round(
-        corals.value.reduce((sum, coral) => sum + coral.coverCm, 0),
+        confirmedCorals.value.reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       ),
       bleachIndex: index,
       grade: bleachGrade(index),
-      bleachedSharePct: bleachedSharePct(corals.value),
+      bleachedSharePct: bleachedSharePct(confirmedCorals.value),
       distribution
     }
   })
@@ -256,10 +268,22 @@ export const useSurveyStore = defineStore('survey', () => {
 
   async function createCoral(
     beltId: string,
-    payload: Omit<CoralRecord, 'id' | 'createdAt' | 'updatedAt' | 'beltId'>
+    payload: Omit<CoralRecord, 'id' | 'createdAt' | 'updatedAt' | 'beltId' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>
   ): Promise<CoralRecord> {
     const now = Date.now()
-    const row: CoralRecord = { ...payload, beltId, id: createId('cor'), createdAt: now, updatedAt: now }
+    const id = createId('cor')
+    const row: CoralRecord = {
+      ...payload,
+      beltId,
+      id,
+      source: '站部主台账',
+      batchId: MASTER_BATCH_ID,
+      mergeStatus: 'confirmed',
+      conflictId: null,
+      originId: id,
+      createdAt: now,
+      updatedAt: now
+    }
     await db.corals.put(row)
     return row
   }
@@ -278,17 +302,25 @@ export const useSurveyStore = defineStore('survey', () => {
     rows: Array<{ genus: string; form: CoralForm; coverCm: number; bleachLevel: BleachLevel }>
   ): Promise<number> {
     const now = Date.now()
-    const records: CoralRecord[] = rows.map((row, index) => ({
-      id: createId('cor'),
-      beltId,
-      genus: row.genus,
-      form: row.form,
-      coverCm: row.coverCm,
-      bleachLevel: row.bleachLevel,
-      remark: '',
-      createdAt: now + index,
-      updatedAt: now + index
-    }))
+    const records: CoralRecord[] = rows.map((row, index) => {
+      const id = createId('cor')
+      return {
+        id,
+        beltId,
+        genus: row.genus,
+        form: row.form,
+        coverCm: row.coverCm,
+        bleachLevel: row.bleachLevel,
+        remark: '',
+        source: '站部主台账',
+        batchId: MASTER_BATCH_ID,
+        mergeStatus: 'confirmed',
+        conflictId: null,
+        originId: id,
+        createdAt: now + index,
+        updatedAt: now + index
+      }
+    })
     await db.transaction('rw', [db.corals], async () => {
       await db.corals.where('beltId').equals(beltId).delete()
       if (records.length > 0) await db.corals.bulkPut(records)
@@ -313,10 +345,22 @@ export const useSurveyStore = defineStore('survey', () => {
 
   async function createFish(
     beltId: string,
-    payload: Omit<FishCount, 'id' | 'createdAt' | 'updatedAt' | 'beltId'>
+    payload: Omit<FishCount, 'id' | 'createdAt' | 'updatedAt' | 'beltId' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>
   ): Promise<FishCount> {
     const now = Date.now()
-    const row: FishCount = { ...payload, beltId, id: createId('fsh'), createdAt: now, updatedAt: now }
+    const id = createId('fsh')
+    const row: FishCount = {
+      ...payload,
+      beltId,
+      id,
+      source: '站部主台账',
+      batchId: MASTER_BATCH_ID,
+      mergeStatus: 'confirmed',
+      conflictId: null,
+      originId: id,
+      createdAt: now,
+      updatedAt: now
+    }
     await db.fishes.put(row)
     return row
   }
@@ -335,16 +379,24 @@ export const useSurveyStore = defineStore('survey', () => {
     rows: Array<{ family: string; count: number; sizeClass: SizeClass; category: CountCategory }>
   ): Promise<number> {
     const now = Date.now()
-    const records: FishCount[] = rows.map((row, index) => ({
-      id: createId('fsh'),
-      beltId,
-      family: row.family,
-      count: row.count,
-      sizeClass: row.sizeClass,
-      category: row.category,
-      createdAt: now + index,
-      updatedAt: now + index
-    }))
+    const records: FishCount[] = rows.map((row, index) => {
+      const id = createId('fsh')
+      return {
+        id,
+        beltId,
+        family: row.family,
+        count: row.count,
+        sizeClass: row.sizeClass,
+        category: row.category,
+        source: '站部主台账',
+        batchId: MASTER_BATCH_ID,
+        mergeStatus: 'confirmed',
+        conflictId: null,
+        originId: id,
+        createdAt: now + index,
+        updatedAt: now + index
+      }
+    })
     await db.transaction('rw', [db.fishes], async () => {
       await db.fishes.where('beltId').equals(beltId).delete()
       if (records.length > 0) await db.fishes.bulkPut(records)
@@ -384,6 +436,8 @@ export const useSurveyStore = defineStore('survey', () => {
     coralDraft,
     fishDraft,
     beltRecordCounts,
+    confirmedCorals,
+    confirmedFishes,
     coverageRows,
     filteredCoverageRows,
     hasFilter,

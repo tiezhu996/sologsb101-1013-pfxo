@@ -4,7 +4,7 @@
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { db, createId, watchTable } from '@/utils/db'
+import { db, createId, watchTable, MASTER_BATCH_ID } from '@/utils/db'
 import type { Belt, BeltDraft, Orientation } from '@/types/belt'
 import { ORIENTATIONS, createEmptyBeltDraft } from '@/types/belt'
 
@@ -100,10 +100,22 @@ export const useBeltStore = defineStore('belt', () => {
 
   async function createBelt(
     siteId: string,
-    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId'>
+    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>
   ): Promise<Belt> {
     const now = Date.now()
-    const row: Belt = { ...payload, siteId, id: createId('belt'), createdAt: now, updatedAt: now }
+    const id = createId('belt')
+    const row: Belt = {
+      ...payload,
+      siteId,
+      id,
+      source: '站部主台账',
+      batchId: MASTER_BATCH_ID,
+      mergeStatus: 'confirmed',
+      conflictId: null,
+      originId: id,
+      createdAt: now,
+      updatedAt: now
+    }
     await db.belts.put(row)
     return row
   }

@@ -130,8 +130,8 @@ export function useCoverage(): UseCoverageResult {
     if (!belt) return null
     const site = siteOf(belt.siteId)
     const reef = site ? reefOf(site.reefId) : null
-    const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
-    const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
+    const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id && coral.mergeStatus !== 'pending')
+    const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id && fish.mergeStatus !== 'pending')
     const coverCmTotal = round(
       beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
       1
@@ -180,6 +180,7 @@ export function useCoverage(): UseCoverageResult {
 
   const allBeltCoverages = computed<BeltCoverage[]>(() =>
     belts.value
+      .filter((belt) => belt.mergeStatus !== 'pending')
       .map((belt) => buildBeltCoverage(belt.id))
       .filter((item): item is BeltCoverage => item !== null)
       .sort((a, b) => b.bleachIndex - a.bleachIndex)

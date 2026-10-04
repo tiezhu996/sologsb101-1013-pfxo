@@ -15,6 +15,7 @@ import { buildQuery, queryToNumber } from '@/types/filter'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import BleachTag from '@/components/common/BleachTag.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
+import SourceTag from '@/components/common/SourceTag.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -52,10 +53,12 @@ const rows = computed(() => {
     if (reefStore.siteFilter.maxDepthM !== null && site.depthM > reefStore.siteFilter.maxDepthM) return false
     return true
   })
-  return sites.map((site) => {
-    const belts = beltStore.beltsOfSite(site.id)
+  return sites
+    .filter((site) => site.mergeStatus !== 'pending')
+    .map((site) => {
+    const belts = beltStore.beltsOfSite(site.id).filter((belt) => belt.mergeStatus !== 'pending')
     const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
+    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId) && coral.mergeStatus !== 'pending')
     const index = bleachIndex(corals)
     return {
       site,
@@ -75,9 +78,11 @@ const filterModel = computed<FilterModel>(() => ({
 }))
 
 const stats = computed(() => {
-  const sites = reefStore.sitesOfReef(reefId.value)
+  const sites = reefStore.sitesOfReef(reefId.value).filter((site) => site.mergeStatus !== 'pending')
   const depths = sites.map((site) => site.depthM)
-  const belts = beltStore.belts.filter((belt) => sites.some((site) => site.id === belt.siteId))
+  const belts = beltStore.belts.filter(
+    (belt) => belt.mergeStatus !== 'pending' && sites.some((site) => site.id === belt.siteId)
+  )
   return {
     siteCount: sites.length,
     beltCount: belts.length,
@@ -278,7 +283,12 @@ onMounted(() => {
       />
 
       <el-table v-else :data="rows" border stripe class="gb-table-compact">
-        <el-table-column prop="site.no" label="站位编号" width="110" />
+        <el-table-column label="站位编号" width="170">
+          <template #default="{ row }">
+            <div>{{ row.site.no }}</div>
+            <SourceTag :source="row.site.source" :merge-status="row.site.mergeStatus" show-confirmed-source />
+          </template>
+        </el-table-column>
         <el-table-column label="经纬度（十进制度）" min-width="200">
           <template #default="{ row }">
             <div class="gb-mono">{{ row.site.lat.toFixed(4) }}, {{ row.site.lng.toFixed(4) }}</div>

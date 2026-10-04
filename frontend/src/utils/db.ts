@@ -11,12 +11,17 @@ import type { Site } from '@/types/site'
 import type { Belt } from '@/types/belt'
 import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
+import type { MergeBase, MergeBatch, MergeConflict } from '@/types/merge'
+import { SOURCE_MASTER } from '@/types/merge'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
+
+/** 站部直接录入记录的批次标记 */
+export const MASTER_BATCH_ID = '-'
 
 /** localStorage 侧少量元数据键名 */
 export const LS_KEYS = {
@@ -30,11 +35,21 @@ export interface BackupPayload {
   app: 'gbcoralbelt'
   dbVersion: number
   exportedAt: string
+  /** 导出来源（站部主台账 / 甲组 / 乙组…） */
+  source: string
+  /** 导出方角色：站部派发带基线，离线组带回改动 */
+  role: 'station' | 'team'
   reefs: Reef[]
   sites: Site[]
   belts: Belt[]
   corals: CoralRecord[]
   fishes: FishCount[]
+  /** 待续处理的合并批次（失败批次与已确认内容、待决差异可恢复） */
+  mergeBatches: MergeBatch[]
+  /** 未决差异 */
+  mergeConflicts: MergeConflict[]
+  /** 派发基线（三方合并用） */
+  mergeBases: MergeBase[]
 }
 
 export class CoralBeltDatabase extends Dexie {
@@ -43,6 +58,9 @@ export class CoralBeltDatabase extends Dexie {
   belts!: Table<Belt, string>
   corals!: Table<CoralRecord, string>
   fishes!: Table<FishCount, string>
+  mergeBatches!: Table<MergeBatch, string>
+  mergeConflicts!: Table<MergeConflict, string>
+  mergeBases!: Table<MergeBase, string>
 
   constructor() {
     super(DB_NAME)
@@ -83,6 +101,37 @@ export class CoralBeltDatabase extends Dexie {
               if (typeof row.createdAt !== 'number') row.createdAt = now
               if (typeof row.updatedAt !== 'number') row.updatedAt = row.createdAt
               Object.assign(row, factory())
+            })
+        }
+      })
+
+    // v3：离线合并。五张业务表补齐来源 / 批次 / 合并状态 / 血缘主键索引，
+    // 新增 mergeBatches（批次留痕）、mergeConflicts（待决差异）、mergeBases（派发基线）。
+    this.version(DB_VERSION)
+      .stores({
+        reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt, source, mergeStatus, originId',
+        sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt, source, mergeStatus, originId',
+        belts: 'id, siteId, no, lengthM, orientation, surveyDate, observer, updatedAt, source, mergeStatus, originId',
+        corals: 'id, beltId, genus, form, coverCm, bleachLevel, updatedAt, source, mergeStatus, conflictId, originId',
+        fishes: 'id, beltId, family, count, sizeClass, category, updatedAt, source, mergeStatus, conflictId, originId',
+        mergeBatches: 'id, no, status, source, createdAt, updatedAt',
+        mergeConflicts: 'id, batchId, entity, status, createdAt',
+        mergeBases: 'id, entity, naturalKey, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 历史台账记录一律视为站部主台账、已确认；originId 取自身主键作为血缘起点
+        for (const tableName of ['reefs', 'sites', 'belts', 'corals', 'fishes']) {
+          await tx
+            .table(tableName)
+            .toCollection()
+            .modify((row: Record<string, unknown>) => {
+              if (typeof row.source !== 'string' || row.source === '') row.source = SOURCE_MASTER
+              if (typeof row.batchId !== 'string' || row.batchId === '') row.batchId = MASTER_BATCH_ID
+              row.mergeStatus = 'confirmed'
+              row.conflictId = null
+              if (typeof row.originId !== 'string' || row.originId === '') {
+                row.originId = String(row.id ?? '')
+              }
             })
         }
       })
@@ -152,7 +201,7 @@ export async function seedDemoData(): Promise<void> {
   const now = Date.now()
   const today = new Date(now).toISOString().slice(0, 10)
 
-  const reefs: Array<Omit<Reef, 'createdAt' | 'updatedAt'>> = [
+  const reefs: Array<Omit<Reef, 'createdAt' | 'updatedAt' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>> = [
     {
       id: 'reef_ql01',
       name: '清澜湾珊瑚礁区',
@@ -179,7 +228,7 @@ export async function seedDemoData(): Promise<void> {
     }
   ]
 
-  const sites: Array<Omit<Site, 'createdAt' | 'updatedAt'>> = [
+  const sites: Array<Omit<Site, 'createdAt' | 'updatedAt' | 'source' | 'batchId' | 'mergeStatus' | 'conflictId' | 'originId'>> = [
     {
       id: 'site_ql_01',
       reefId: 'reef_ql01',
@@ -314,32 +363,58 @@ export async function seedDemoData(): Promise<void> {
     }
   ]
 
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.mergeBatches, db.mergeConflicts, db.mergeBases],
+    async () => {
     const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
       createdAt: now + offset,
       updatedAt: now + offset
     })
+    /** 演示数据的站部来源标记 */
+    const provenance = {
+      source: SOURCE_MASTER,
+      batchId: MASTER_BATCH_ID,
+      mergeStatus: 'confirmed' as const,
+      conflictId: null
+    }
 
-    await db.reefs.bulkPut(reefs.map((reef, index) => ({ ...reef, ...stamp(index) })))
-    await db.sites.bulkPut(sites.map((site, index) => ({ ...site, ...stamp(100 + index) })))
+    await db.reefs.bulkPut(
+      reefs.map((reef, index) => ({ ...reef, ...provenance, originId: reef.id, ...stamp(index) }))
+    )
+    await db.sites.bulkPut(
+      sites.map((site, index) => ({ ...site, ...provenance, originId: site.id, ...stamp(100 + index) }))
+    )
     await db.belts.bulkPut(
       belts.map((belt, index) => {
         const { corals, fishes, ...rest } = belt
         void corals
         void fishes
-        return { ...rest, ...stamp(200 + index) }
+        return { ...rest, ...provenance, originId: belt.id, ...stamp(200 + index) }
       })
     )
     await db.corals.bulkPut(
       belts.flatMap((belt, beltIndex) =>
-        belt.corals.map((coral, coralIndex) => ({ ...coral, ...stamp(300 + beltIndex * 100 + coralIndex) }))
+        belt.corals.map((coral, coralIndex) => ({
+          ...coral,
+          ...provenance,
+          originId: coral.id,
+          ...stamp(300 + beltIndex * 100 + coralIndex)
+        }))
       )
     )
     await db.fishes.bulkPut(
       belts.flatMap((belt, beltIndex) =>
-        belt.fishes.map((fish, fishIndex) => ({ ...fish, ...stamp(400 + beltIndex * 100 + fishIndex) }))
+        belt.fishes.map((fish, fishIndex) => ({
+          ...fish,
+          ...provenance,
+          originId: fish.id,
+          ...stamp(400 + beltIndex * 100 + fishIndex)
+        }))
       )
     )
+    // 演示数据不带未决批次
+    await Promise.all([db.mergeBatches.clear(), db.mergeConflicts.clear()])
   })
 }
 
@@ -353,11 +428,24 @@ export async function initDatabase(): Promise<void> {
   stampDbVersion()
 }
 
-/** 清空全部业务表（导入覆盖与重置共用） */
+/** 清空全部业务表（导入覆盖与重置共用；合并留痕表一并清空） */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await Promise.all([db.reefs.clear(), db.sites.clear(), db.belts.clear(), db.corals.clear(), db.fishes.clear()])
-  })
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.mergeBatches, db.mergeConflicts, db.mergeBases],
+    async () => {
+      await Promise.all([
+        db.reefs.clear(),
+        db.sites.clear(),
+        db.belts.clear(),
+        db.corals.clear(),
+        db.fishes.clear(),
+        db.mergeBatches.clear(),
+        db.mergeConflicts.clear(),
+        db.mergeBases.clear()
+      ])
+    }
+  )
 }
 
 /** 清空并重新播种演示数据 */
@@ -368,14 +456,17 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与覆盖度页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, belts, corals, fishes, mergeBatches, mergeConflicts, mergeBases] = await Promise.all([
     db.reefs.count(),
     db.sites.count(),
     db.belts.count(),
     db.corals.count(),
-    db.fishes.count()
+    db.fishes.count(),
+    db.mergeBatches.count(),
+    db.mergeConflicts.where('status').equals('pending').count(),
+    db.mergeBases.count()
   ])
-  return { reefs, sites, belts, corals, fishes }
+  return { reefs, sites, belts, corals, fishes, mergeBatches, mergeConflicts, mergeBases }
 }
 
 /** 写入结构版本号到 localStorage，便于覆盖度页比对 */

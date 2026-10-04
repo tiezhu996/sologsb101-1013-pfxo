@@ -16,6 +16,16 @@ export interface Reef {
   protectStatus: ProtectStatus
   /** 管理单位 */
   manager: string
+  /** 来源（站部主台账 / 甲组 / 乙组…，离线合并标记） */
+  source: string
+  /** 最后写入记录的合并批次 id */
+  batchId: string
+  /** 合并状态：confirmed 进入覆盖度汇总，pending 为待决差异副本 */
+  mergeStatus: 'confirmed' | 'pending'
+  /** 待决时关联的冲突 id */
+  conflictId: string | null
+  /** 派发血缘主键：离线副本对应的站部原始记录 id */
+  originId: string
   createdAt: number
   updatedAt: number
 }

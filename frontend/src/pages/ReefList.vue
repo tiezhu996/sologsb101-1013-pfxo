@@ -42,13 +42,15 @@ const form = reactive({
 
 /** 礁区卡片：汇总站位/样带/珊瑚记录数与平均白化指数 */
 const cards = computed(() =>
-  reefStore.filteredReefs.map((reef: Reef) => {
-    const sites = reefStore.sites.filter((site) => site.reefId === reef.id)
+  reefStore.filteredReefs
+    .filter((reef) => reef.mergeStatus !== 'pending')
+    .map((reef: Reef) => {
+    const sites = reefStore.sites.filter((site) => site.reefId === reef.id && site.mergeStatus !== 'pending')
     const siteIds = new Set(sites.map((site) => site.id))
-    const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId))
+    const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId) && belt.mergeStatus !== 'pending')
     const beltIds = new Set(belts.map((belt) => belt.id))
-    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
-    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId))
+    const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId) && coral.mergeStatus !== 'pending')
+    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId) && fish.mergeStatus !== 'pending')
     const index = bleachIndex(corals)
     return {
       reef,
